@@ -18,7 +18,7 @@ use crate::error::FetchModelError;
 use crate::{
 	environment::get_environment,
 	error::{assert_non_null_pointer, status_to_result, Error, Result},
-	execution_providers::{apply_execution_providers, ExecutionProviderDispatch},
+	execution_providers::{apply_execution_providers, apply_execution_providers_with_retries, ExecutionProviderDispatch},
 	memory::{Allocator, MemoryInfo},
 	operator::OperatorDomain,
 	ortsys
@@ -109,6 +109,15 @@ impl SessionBuilder {
 	///   providing a `Vec` of [`ExecutionProviderDispatch`]es.
 	pub fn with_execution_providers(self, execution_providers: impl IntoIterator<Item = ExecutionProviderDispatch>) -> Result<Self> {
 		apply_execution_providers(&self, execution_providers.into_iter())?;
+		Ok(self)
+	}
+
+	pub fn retries_with_execution_providers(
+		self,
+		execution_providers: impl IntoIterator<Item = ExecutionProviderDispatch>,
+		retry_count: usize
+	) -> Result<Self> {
+		apply_execution_providers_with_retries(&self, execution_providers.into_iter(), retry_count)?;
 		Ok(self)
 	}
 
@@ -305,6 +314,16 @@ impl SessionBuilder {
 	where
 		P: AsRef<Path>
 	{
+		self.commit_from_file_with_retries(model_filepath_ref, 1)
+	}
+
+	/// Loads an ONNX model from a file and builds the session.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[cfg_attr(docsrs, doc(cfg(not(target_arch = "wasm32"))))]
+	pub fn commit_from_file_with_retries<P>(mut self, model_filepath_ref: P, retries: usize) -> Result<Session>
+	where
+		P: AsRef<Path>
+	{
 		let model_filepath = model_filepath_ref.as_ref();
 		if !model_filepath.exists() {
 			return Err(Error::FileDoesNotExist {
@@ -315,7 +334,7 @@ impl SessionBuilder {
 		let model_path = crate::util::path_to_os_char(model_filepath);
 
 		let env = get_environment()?;
-		apply_execution_providers(&self, env.execution_providers.iter().cloned())?;
+		apply_execution_providers_with_retries(&self, env.execution_providers.iter().cloned(), retries)?;
 
 		if env.has_global_threadpool {
 			ortsys![unsafe DisablePerSessionThreads(self.session_options_ptr.as_ptr()) -> Error::CreateSessionOptions];
@@ -389,10 +408,14 @@ impl SessionBuilder {
 
 	/// Load an ONNX graph from memory and commit the session.
 	pub fn commit_from_memory(mut self, model_bytes: &[u8]) -> Result<Session> {
+		self.commit_from_memory_with_retries(model_bytes, 1)
+	}
+	/// Load an ONNX graph from memory and commit the session.
+	pub fn commit_from_memory_with_retries(mut self, model_bytes: &[u8], retries: usize) -> Result<Session> {
 		let mut session_ptr: *mut ort_sys::OrtSession = std::ptr::null_mut();
 
 		let env = get_environment()?;
-		apply_execution_providers(&self, env.execution_providers.iter().cloned())?;
+		apply_execution_providers_with_retries(&self, env.execution_providers.iter().cloned(), retries)?;
 
 		if env.has_global_threadpool {
 			ortsys![unsafe DisablePerSessionThreads(self.session_options_ptr.as_ptr()) -> Error::CreateSessionOptions];

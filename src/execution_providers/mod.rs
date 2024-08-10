@@ -4,7 +4,7 @@ use crate::{
 	char_p_to_string,
 	error::{Error, Result},
 	ortsys,
-	session::SessionBuilder
+	session::SessionBuilder,
 };
 
 mod cpu;
@@ -115,7 +115,7 @@ pub enum ArenaExtendStrategy {
 	#[default]
 	NextPowerOfTwo,
 	/// Memory extends by the requested amount.
-	SameAsRequested
+	SameAsRequested,
 }
 
 /// Dynamic execution provider container, used to provide a list of multiple types of execution providers when
@@ -128,14 +128,14 @@ pub enum ArenaExtendStrategy {
 #[non_exhaustive]
 pub struct ExecutionProviderDispatch {
 	pub(crate) inner: Arc<dyn ExecutionProvider>,
-	error_on_failure: bool
+	error_on_failure: bool,
 }
 
 impl ExecutionProviderDispatch {
 	pub(crate) fn new<E: ExecutionProvider + 'static>(ep: E) -> Self {
 		ExecutionProviderDispatch {
 			inner: Arc::new(ep) as Arc<dyn ExecutionProvider>,
-			error_on_failure: false
+			error_on_failure: false,
 		}
 	}
 
@@ -230,6 +230,47 @@ pub(crate) fn apply_execution_providers(session_builder: &SessionBuilder, execut
 		} else {
 			tracing::info!("Successfully registered `{}`", ex.inner.as_str());
 			fallback_to_cpu = false;
+		}
+	}
+	if fallback_to_cpu {
+		tracing::warn!("No execution providers registered successfully. Falling back to CPU.");
+	}
+	Ok(())
+}
+
+// try only one execution provider
+#[tracing::instrument(skip_all)]
+pub(crate) fn apply_execution_providers_with_retries(
+	session_builder: &SessionBuilder,
+	execution_providers: impl Iterator<Item = ExecutionProviderDispatch>,
+	count: usize,
+) -> Result<()> {
+	let execution_providers: Vec<_> = execution_providers.collect();
+	let mut fallback_to_cpu = !execution_providers.is_empty();
+	for ex in execution_providers {
+		for i in 0..count {
+			if let Err(e) = ex.inner.register(session_builder) {
+				if fallback_to_cpu && i < count - 1 {
+					continue;
+				}
+				if ex.error_on_failure {
+					return Err(e);
+				}
+
+				if let &Error::ExecutionProviderNotRegistered(ep_name) = &e {
+					if ex.inner.supported_by_platform() {
+						tracing::warn!("{e}");
+					} else {
+						tracing::debug!("{e} (note: additionally, `{ep_name}` is not supported on this platform)");
+					}
+				} else {
+					tracing::error!("An error occurred when attempting to register `{}`: {e}", ex.inner.as_str());
+				}
+			} else {
+				tracing::info!("Successfully registered `{}`", ex.inner.as_str());
+				fallback_to_cpu = false;
+				break;
+			}
 		}
 	}
 	if fallback_to_cpu {
